@@ -1,9 +1,24 @@
 'use strict';
 
-const express = require('express');
-const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+
+// Load .env from project root (optional — does not override existing env vars).
+const envFile = path.join(__dirname, '..', '.env');
+if (fs.existsSync(envFile)) {
+  for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+    if (!process.env[key]) process.env[key] = val;
+  }
+}
+
+const express = require('express');
+const multer = require('multer');
 const crypto = require('crypto');
 const archiver = require('archiver');
 const ExcelJS = require('exceljs');
