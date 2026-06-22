@@ -33,13 +33,34 @@
   <span class="lock" id="lock">Secured</span>
 </div>
 
-<div class="tabs">
-  <div class="tab active" data-tab="design" onclick="switchTab('design')">Design &amp; Generate</div>
-  <div class="tab" data-tab="responses" onclick="switchTab('responses')">RSVP Responses</div>
+<div class="tabs" id="mainTabs">
+  <div class="tab active" data-tab="home" onclick="switchTab('home')">My Invitations</div>
+  <div class="tab hidden" data-tab="design" id="tabDesignBtn" onclick="switchTab('design')">Design &amp; Generate</div>
+  <div class="tab hidden" data-tab="responses" id="tabResponsesBtn" onclick="switchTab('responses')">RSVP Responses</div>
+</div>
+
+<!-- ===================== HOME ===================== -->
+<div id="tab-home">
+  <div class="home-wrap">
+    <div class="home-head">
+      <div>
+        <h2>Your invitations</h2>
+        <p class="hint">Create separate invitation projects — each with its own template, guest list, and RSVPs.</p>
+      </div>
+      <button class="btn primary sm" onclick="createInvite()">+ New invitation</button>
+    </div>
+    <div id="inviteList" class="invite-grid"></div>
+  </div>
 </div>
 
 <!-- ===================== DESIGN TAB ===================== -->
-<div id="tab-design">
+<div id="tab-design" class="hidden">
+<div class="editor-bar">
+  <button class="btn ghost sm back-btn" onclick="goHome()">← All invitations</button>
+  <input type="text" class="invite-title" id="inviteTitle" placeholder="Invitation title" onchange="saveTitle()">
+  <div class="spacer"></div>
+  <button class="btn ghost sm danger" onclick="deleteCurrentInvite()">Delete</button>
+</div>
 <div class="layout">
   <div class="rail">
 
@@ -52,6 +73,13 @@
         <div class="s" id="tplSub">PDF · single page</div>
       </label>
       <input type="file" id="tplInput" accept="application/pdf">
+      <div class="progress-wrap" id="tplProgress">
+        <div class="progress-meta">
+          <span id="tplProgressLbl">Uploading template…</span>
+          <span id="tplProgressPct">0%</span>
+        </div>
+        <div class="progress-track"><div class="progress-bar" id="tplProgressBar"></div></div>
+      </div>
     </div>
 
     <div class="step">
@@ -144,8 +172,15 @@
       </div>
       <div class="busy" id="genBusy"><span class="spin"></span><span id="genBusyTxt">Generating…</span></div>
       <div class="btnrow" id="afterGen" style="display:none">
-        <button class="btn primary sm" style="flex:1" onclick="downloadZip()">Download ZIP</button>
+        <button class="btn primary sm" style="flex:1" id="zipBtn" onclick="downloadZip()">Download ZIP</button>
         <button class="btn ghost sm" style="flex:1" onclick="switchTab('responses')">View list</button>
+      </div>
+      <div class="progress-wrap" id="zipProgress">
+        <div class="progress-meta">
+          <span id="zipProgressLbl">Downloading ZIP…</span>
+          <span id="zipProgressPct">0%</span>
+        </div>
+        <div class="progress-track"><div class="progress-bar" id="zipProgressBar"></div></div>
       </div>
       <button class="btn ghost sm" style="margin-top:11px; color:var(--no)" onclick="doReset()">Reset everything</button>
     </div>

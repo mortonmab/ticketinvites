@@ -10,42 +10,43 @@ const ExcelJS = require('exceljs');
 const { PDFDocument } = require('pdf-lib');
 
 const store = require('./store');
+const { DEFAULT_BASE_URL } = store;
 const { generateInvitation } = require('./generate');
 const pages = require('./pages');
 
 store.load();
 
-// If a BASE_URL is provided via env and the admin hasn't set one yet,
-// seed it so QR codes and RSVP links resolve to the public address.
-if (process.env.BASE_URL && !store.getSettings().baseUrl) {
+if (process.env.BASE_URL && isLocalBaseUrl(store.getSettings().baseUrl)) {
   store.updateSettings({ baseUrl: process.env.BASE_URL.replace(/\/$/, '') });
 }
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ''; // empty => open mode
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const AUTH_REQUIRED = ADMIN_PASSWORD.length > 0;
-
-const DATA_DIR = store.DATA_DIR;
-const TEMPLATE_PATH = path.join(DATA_DIR, 'template.pdf');
-const OUTPUT_DIR = path.join(DATA_DIR, 'output');
-if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
-
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
 const validTokens = new Set();
+
+function isLocalBaseUrl(url) {
+  return !url || /localhost|127\.0\.0\.1/i.test(url);
+}
 
 function requireAdmin(req, res, next) {
   if (!AUTH_REQUIRED) return next();
   const token = req.get('x-admin-token');
   if (token && validTokens.has(token)) return next();
   return res.status(401).json({ error: 'Unauthorized' });
+}
+
+function requireInvite(req, res, next) {
+  const invite = store.getInvite(req.params.id);
+  if (!invite) return res.status(404).json({ error: 'Invitation not found' });
+  req.invite = invite;
+  next();
 }
 
 app.post('/admin/login', (req, res) => {
@@ -59,12 +60,9 @@ app.post('/admin/login', (req, res) => {
   return res.status(401).json({ error: 'Incorrect password' });
 });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-function baseUrlFrom(req, override) {
-  const s = store.getSettings();
-  return (override || s.baseUrl || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+function baseUrlFrom(req, invite, override) {
+  const global = store.getSettings().baseUrl;
+  return (override || invite.baseUrl || global || DEFAULT_BASE_URL).replace(/\/$/, '');
 }
 
 function safeFileName(name) {
@@ -72,10 +70,9 @@ function safeFileName(name) {
 }
 
 function newId() {
-  // Short, URL-safe, collision-checked unique id.
   let id;
   do {
-    id = crypto.randomBytes(5).toString('hex'); // 10 hex chars
+    id = crypto.randomBytes(5).toString('hex');
   } while (store.getInvitee(id));
   return id;
 }
@@ -107,38 +104,68 @@ async function parseNames(file) {
       });
     }
   }
-  // Drop a header cell if present.
   if (names.length && /^(invitee\s*)?name$/i.test(names[0])) names.shift();
   return names;
 }
 
-// ---------------------------------------------------------------------------
-// Admin: configuration
-// ---------------------------------------------------------------------------
+function inviteConfig(req, invite) {
+  return {
+    id: invite.id,
+    title: invite.title,
+    templateName: invite.templateName,
+    pageWidth: invite.pageWidth,
+    pageHeight: invite.pageHeight,
+    layout: invite.layout,
+    baseUrl: invite.baseUrl || store.getSettings().baseUrl || DEFAULT_BASE_URL,
+    names: invite.names || [],
+    nameCount: (invite.names || []).length,
+    generatedCount: (invite.invitees || []).filter((i) => !i.preview).length
+  };
+}
+
 app.get('/admin/config', requireAdmin, (req, res) => {
-  const s = store.getSettings();
-  res.json({
-    authRequired: AUTH_REQUIRED,
-    templateName: s.templateName,
-    pageWidth: s.pageWidth,
-    pageHeight: s.pageHeight,
-    layout: s.layout,
-    baseUrl: s.baseUrl || `${req.protocol}://${req.get('host')}`,
-    names: s.names || [],
-    nameCount: (s.names || []).length,
-    generatedCount: store.getInvitees().length
-  });
+  res.json({ authRequired: AUTH_REQUIRED, baseUrl: store.getSettings().baseUrl || DEFAULT_BASE_URL });
 });
 
-app.post('/admin/template', requireAdmin, upload.single('template'), async (req, res) => {
+app.get('/admin/invites', requireAdmin, (req, res) => {
+  res.json({ invites: store.getInvites().map(store.inviteSummary) });
+});
+
+app.post('/admin/invites', requireAdmin, (req, res) => {
+  const title = (req.body && req.body.title) ? String(req.body.title).trim() : '';
+  const invite = store.createInvite(title || 'Untitled invitation');
+  res.json({ invite: store.inviteSummary(invite) });
+});
+
+app.get('/admin/invites/:id', requireAdmin, requireInvite, (req, res) => {
+  res.json(inviteConfig(req, req.invite));
+});
+
+app.patch('/admin/invites/:id', requireAdmin, requireInvite, (req, res) => {
+  const patch = {};
+  if (req.body && typeof req.body.title === 'string') {
+    patch.title = req.body.title.trim() || 'Untitled invitation';
+  }
+  const invite = store.updateInvite(req.params.id, patch);
+  res.json({ invite: store.inviteSummary(invite) });
+});
+
+app.delete('/admin/invites/:id', requireAdmin, requireInvite, (req, res) => {
+  store.deleteInvite(req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/admin/invites/:id/template', requireAdmin, requireInvite, upload.single('template'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const bytes = req.file.buffer;
     const doc = await PDFDocument.load(bytes);
     const page = doc.getPages()[0];
     const { width, height } = page.getSize();
-    fs.writeFileSync(TEMPLATE_PATH, bytes);
-    store.updateSettings({
+    const inviteId = req.params.id;
+    store.ensureInviteDirs(inviteId);
+    fs.writeFileSync(store.templatePath(inviteId), bytes);
+    store.updateInvite(inviteId, {
       templateName: req.file.originalname,
       pageWidth: Math.round(width),
       pageHeight: Math.round(height)
@@ -149,48 +176,47 @@ app.post('/admin/template', requireAdmin, upload.single('template'), async (req,
   }
 });
 
-app.get('/admin/template.pdf', requireAdmin, (req, res) => {
-  if (!fs.existsSync(TEMPLATE_PATH)) return res.status(404).end();
+app.get('/admin/invites/:id/template.pdf', requireAdmin, requireInvite, (req, res) => {
+  const fp = store.templatePath(req.params.id);
+  if (!fs.existsSync(fp)) return res.status(404).end();
   res.type('application/pdf');
-  fs.createReadStream(TEMPLATE_PATH).pipe(res);
+  fs.createReadStream(fp).pipe(res);
 });
 
-app.post('/admin/names', requireAdmin, upload.single('excel'), async (req, res) => {
+app.post('/admin/invites/:id/names', requireAdmin, requireInvite, upload.single('excel'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const names = await parseNames(req.file);
     if (!names.length) return res.status(400).json({ error: 'No names found in the file.' });
-    store.updateSettings({ names });
+    store.updateInvite(req.params.id, { names });
     res.json({ count: names.length, sample: names.slice(0, 5) });
   } catch (err) {
     res.status(400).json({ error: 'Could not read spreadsheet: ' + err.message });
   }
 });
 
-app.post('/admin/layout', requireAdmin, (req, res) => {
+app.post('/admin/invites/:id/layout', requireAdmin, requireInvite, (req, res) => {
   const { layout, baseUrl } = req.body || {};
   const patch = {};
   if (layout) patch.layout = layout;
   if (typeof baseUrl === 'string') patch.baseUrl = baseUrl.trim();
-  store.updateSettings(patch);
+  store.updateInvite(req.params.id, patch);
   res.json({ ok: true });
 });
 
-// ---------------------------------------------------------------------------
-// Admin: preview + generation
-// ---------------------------------------------------------------------------
-app.post('/admin/preview', requireAdmin, async (req, res) => {
+app.post('/admin/invites/:id/preview', requireAdmin, requireInvite, async (req, res) => {
   try {
-    if (!fs.existsSync(TEMPLATE_PATH)) return res.status(400).json({ error: 'Upload a template first.' });
-    const s = store.getSettings();
-    const layout = (req.body && req.body.layout) || s.layout;
+    const tplPath = store.templatePath(req.params.id);
+    if (!fs.existsSync(tplPath)) return res.status(400).json({ error: 'Upload a template first.' });
+    const invite = req.invite;
+    const layout = (req.body && req.body.layout) || invite.layout;
     if (!layout) return res.status(400).json({ error: 'Position the elements first.' });
-    const sampleName = (s.names && s.names[0]) || 'Sample Guest';
+    const guest = store.ensurePreviewGuest(invite);
     const bytes = await generateInvitation({
-      templateBytes: fs.readFileSync(TEMPLATE_PATH),
-      name: sampleName,
-      id: 'SAMPLE0000',
-      baseUrl: baseUrlFrom(req, req.body && req.body.baseUrl),
+      templateBytes: fs.readFileSync(tplPath),
+      name: guest.name,
+      id: guest.id,
+      baseUrl: baseUrlFrom(req, invite, req.body && req.body.baseUrl),
       layout
     });
     res.type('application/pdf').send(Buffer.from(bytes));
@@ -199,74 +225,77 @@ app.post('/admin/preview', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/generate', requireAdmin, async (req, res) => {
+app.post('/admin/invites/:id/generate', requireAdmin, requireInvite, async (req, res) => {
   try {
-    if (!fs.existsSync(TEMPLATE_PATH)) return res.status(400).json({ error: 'Upload a template first.' });
-    const s = store.getSettings();
-    const layout = (req.body && req.body.layout) || s.layout;
-    const names = s.names || [];
+    const inviteId = req.params.id;
+    const tplPath = store.templatePath(inviteId);
+    if (!fs.existsSync(tplPath)) return res.status(400).json({ error: 'Upload a template first.' });
+    const invite = req.invite;
+    const layout = (req.body && req.body.layout) || invite.layout;
+    const names = invite.names || [];
     if (!layout) return res.status(400).json({ error: 'Position the elements first.' });
     if (!names.length) return res.status(400).json({ error: 'Upload an Excel file with names first.' });
 
-    if (req.body && typeof req.body.baseUrl === 'string') {
-      store.updateSettings({ baseUrl: req.body.baseUrl.trim(), layout });
-    } else {
-      store.updateSettings({ layout });
-    }
-    const baseUrl = baseUrlFrom(req, req.body && req.body.baseUrl);
+    const patch = { layout };
+    if (req.body && typeof req.body.baseUrl === 'string') patch.baseUrl = req.body.baseUrl.trim();
+    store.updateInvite(inviteId, patch);
+    const updated = store.getInvite(inviteId);
+    const baseUrl = baseUrlFrom(req, updated, req.body && req.body.baseUrl);
 
-    // Fresh batch: clear old invitees, rsvps, and output files.
-    for (const f of fs.readdirSync(OUTPUT_DIR)) fs.unlinkSync(path.join(OUTPUT_DIR, f));
-    store.clearAll();
+    const outDir = store.outputDir(inviteId);
+    store.ensureInviteDirs(inviteId);
+    for (const f of fs.readdirSync(outDir)) fs.unlinkSync(path.join(outDir, f));
+    store.clearInviteBatch(inviteId);
 
-    const templateBytes = fs.readFileSync(TEMPLATE_PATH);
+    const templateBytes = fs.readFileSync(tplPath);
     const invitees = [];
     for (const name of names) {
       const id = newId();
       const bytes = await generateInvitation({ templateBytes, name, id, baseUrl, layout });
       const file = `${safeFileName(name)}_${id}.pdf`;
-      fs.writeFileSync(path.join(OUTPUT_DIR, file), Buffer.from(bytes));
-      const inv = { id, name, createdAt: new Date().toISOString(), pdfFile: file, checkedIn: false, checkedInAt: null };
-      invitees.push(inv);
+      fs.writeFileSync(path.join(outDir, file), Buffer.from(bytes));
+      invitees.push({
+        id, name, createdAt: new Date().toISOString(), pdfFile: file,
+        checkedIn: false, checkedInAt: null
+      });
     }
-    store.replaceInvitees(invitees);
+    store.replaceInvitees(inviteId, invitees);
     res.json({ count: invitees.length, baseUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------------------------------------------------------------------------
-// Admin: downloads + RSVP dashboard
-// ---------------------------------------------------------------------------
-app.get('/admin/invitees', requireAdmin, (req, res) => {
-  res.json({ invitees: store.getRsvpRows() });
+app.get('/admin/invites/:id/invitees', requireAdmin, requireInvite, (req, res) => {
+  res.json({ invitees: store.getRsvpRows(req.params.id) });
 });
 
-app.get('/admin/pdf/:id', requireAdmin, (req, res) => {
-  const inv = store.getInvitee(req.params.id);
+app.get('/admin/invites/:id/pdf/:inviteeId', requireAdmin, requireInvite, (req, res) => {
+  const inv = req.invite.invitees.find((i) => i.id === req.params.inviteeId);
   if (!inv) return res.status(404).end();
-  const fp = path.join(OUTPUT_DIR, inv.pdfFile);
+  const fp = path.join(store.outputDir(req.params.id), inv.pdfFile);
   if (!fs.existsSync(fp)) return res.status(404).end();
   res.download(fp, inv.pdfFile);
 });
 
-app.get('/admin/zip', requireAdmin, (req, res) => {
-  const invitees = store.getInvitees();
+app.get('/admin/invites/:id/zip', requireAdmin, requireInvite, (req, res) => {
+  const invitees = (req.invite.invitees || []).filter((i) => !i.preview);
   if (!invitees.length) return res.status(400).json({ error: 'Nothing generated yet.' });
-  res.attachment('worship-moments-invitations.zip');
+  const safeTitle = safeFileName(req.invite.title) || 'invitations';
+  res.attachment(`${safeTitle}.zip`);
   const archive = archiver('zip', { zlib: { level: 9 } });
   archive.on('error', () => res.status(500).end());
   archive.pipe(res);
+  const outDir = store.outputDir(req.params.id);
   for (const inv of invitees) {
-    const fp = path.join(OUTPUT_DIR, inv.pdfFile);
+    const fp = path.join(outDir, inv.pdfFile);
     if (fs.existsSync(fp)) archive.file(fp, { name: inv.pdfFile });
   }
   archive.finalize();
 });
 
-app.get('/admin/rsvps.xlsx', requireAdmin, async (req, res) => {
-  const rows = store.getRsvpRows();
+app.get('/admin/invites/:id/rsvps.xlsx', requireAdmin, requireInvite, async (req, res) => {
+  const rows = store.getRsvpRows(req.params.id);
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('RSVP Responses');
   ws.columns = [
@@ -280,57 +309,58 @@ app.get('/admin/rsvps.xlsx', requireAdmin, async (req, res) => {
   ];
   ws.getRow(1).font = { bold: true };
   rows.forEach((r) => ws.addRow(r));
+  const safeTitle = safeFileName(req.invite.title) || 'rsvps';
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename="worship-moments-rsvps.xlsx"');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}-rsvps.xlsx"`);
   await wb.xlsx.write(res);
   res.end();
 });
 
-app.post('/admin/reset', requireAdmin, (req, res) => {
-  for (const f of fs.readdirSync(OUTPUT_DIR)) fs.unlinkSync(path.join(OUTPUT_DIR, f));
-  store.clearAll();
+app.post('/admin/invites/:id/reset', requireAdmin, requireInvite, (req, res) => {
+  const outDir = store.outputDir(req.params.id);
+  if (fs.existsSync(outDir)) {
+    for (const f of fs.readdirSync(outDir)) fs.unlinkSync(path.join(outDir, f));
+  }
+  store.clearInviteBatch(req.params.id);
   res.json({ ok: true });
 });
 
-// ---------------------------------------------------------------------------
-// Public: RSVP form + verification (reachable by anyone with the link/QR)
-// ---------------------------------------------------------------------------
 app.get('/r/:id', (req, res) => {
-  const inv = store.getInvitee(req.params.id);
-  if (!inv) return res.status(404).send(pages.notFound());
-  const rsvp = store.getRsvp(inv.id);
-  res.send(pages.rsvpForm(inv, rsvp));
+  const found = store.findInvitee(req.params.id);
+  if (!found) return res.status(404).send(pages.notFound());
+  const rsvp = store.getRsvp(found.invite.id, found.invitee.id);
+  res.send(pages.rsvpForm(found.invitee, rsvp));
 });
 
 app.post('/r/:id', (req, res) => {
-  const inv = store.getInvitee(req.params.id);
-  if (!inv) return res.status(404).send(pages.notFound());
+  const found = store.findInvitee(req.params.id);
+  if (!found) return res.status(404).send(pages.notFound());
   const status = req.body.status === 'Yes' ? 'Yes' : (req.body.status === 'No' ? 'No' : null);
-  if (!status) return res.status(400).send(pages.rsvpForm(inv, store.getRsvp(inv.id), 'Please choose Yes or No.'));
-  store.upsertRsvp(inv.id, status, (req.body.comments || '').slice(0, 1000));
-  res.send(pages.rsvpThanks(inv, status));
+  if (!status) {
+    const rsvp = store.getRsvp(found.invite.id, found.invitee.id);
+    return res.status(400).send(pages.rsvpForm(found.invitee, rsvp, 'Please choose Yes or No.'));
+  }
+  store.upsertRsvp(found.invitee.id, status, (req.body.comments || '').slice(0, 1000));
+  res.send(pages.rsvpThanks(found.invitee, status));
 });
 
 app.get('/v/:id', (req, res) => {
-  const inv = store.getInvitee(req.params.id);
-  if (!inv) return res.status(404).send(pages.notFound());
-  const rsvp = store.getRsvp(inv.id);
-  res.send(pages.verifyPage(inv, rsvp, AUTH_REQUIRED));
+  const found = store.findInvitee(req.params.id);
+  if (!found) return res.status(404).send(pages.notFound());
+  const rsvp = store.getRsvp(found.invite.id, found.invitee.id);
+  res.send(pages.verifyPage(found.invitee, rsvp, AUTH_REQUIRED));
 });
 
 app.post('/v/:id/checkin', (req, res) => {
-  const inv = store.getInvitee(req.params.id);
-  if (!inv) return res.status(404).json({ error: 'Not found' });
+  const found = store.findInvitee(req.params.id);
+  if (!found) return res.status(404).json({ error: 'Not found' });
   if (AUTH_REQUIRED && (req.body.pin || '') !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: 'Incorrect gate PIN' });
   }
-  store.setCheckedIn(inv.id, true);
-  res.json({ ok: true, checkedInAt: store.getInvitee(inv.id).checkedInAt });
+  store.setCheckedIn(found.invitee.id, true);
+  res.json({ ok: true, checkedInAt: store.getInvitee(found.invitee.id).checkedInAt });
 });
 
-// ---------------------------------------------------------------------------
-// Static admin dashboard
-// ---------------------------------------------------------------------------
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.listen(PORT, () => {
@@ -338,7 +368,7 @@ app.listen(PORT, () => {
   console.log('  ───────────────────────────────────');
   console.log(`  Admin dashboard : http://localhost:${PORT}/`);
   console.log(`  Auth            : ${AUTH_REQUIRED ? 'password protected' : 'OPEN (set ADMIN_PASSWORD to lock)'}`);
-  const bu = store.getSettings().baseUrl || process.env.BASE_URL || '(not set — using request host)';
+  const bu = store.getSettings().baseUrl || process.env.BASE_URL || DEFAULT_BASE_URL;
   console.log(`  Public base URL : ${bu}`);
   console.log('');
 });

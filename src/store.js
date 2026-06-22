@@ -1,53 +1,150 @@
 'use strict';
 
-/**
- * A tiny, dependency-free, file-backed JSON store.
- *
- * Everything lives in one JSON file (data/db.json) that is written
- * atomically (write to a temp file, then rename) so a crash mid-write
- * can never corrupt the database. This keeps the whole app install-anywhere
- * with no native build step. For an event with hundreds — even a few
- * thousand — invitees this is more than fast enough.
- */
-
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
+const INVITES_DIR = path.join(DATA_DIR, 'invites');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const TMP_FILE = path.join(DATA_DIR, 'db.json.tmp');
 
+const DEFAULT_BASE_URL = 'https://invites.ticketbox.co.zw';
+
 const DEFAULT_DB = {
-  // Persisted admin configuration.
-  settings: {
-    baseUrl: '',          // public URL where this app is reachable (bakes into QR/RSVP links)
-    templateName: '',     // original filename of the uploaded template
-    pageWidth: 612,       // points
-    pageHeight: 792,      // points
-    layout: null          // positions of name / qr / rsvp elements
-  },
-  // One record per generated invitee.
-  // { id, name, createdAt, pdfFile, checkedIn, checkedInAt }
-  invitees: [],
-  // RSVP responses keyed inline. { inviteeId, status, comments, respondedAt }
-  rsvps: []
+  settings: { baseUrl: DEFAULT_BASE_URL },
+  invites: []
 };
 
 let db = null;
 
-function ensureDir() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function newInviteId() {
+  let id;
+  do {
+    id = crypto.randomBytes(5).toString('hex');
+  } while (getInvite(id));
+  return id;
+}
+
+function defaultInvite(title) {
+  const now = new Date().toISOString();
+  return {
+    id: newInviteId(),
+    title: title || 'Untitled invitation',
+    createdAt: now,
+    updatedAt: now,
+    templateName: '',
+    pageWidth: 612,
+    pageHeight: 792,
+    layout: null,
+    names: [],
+    baseUrl: '',
+    invitees: [],
+    rsvps: []
+  };
+}
+
+function inviteDir(id) {
+  return path.join(INVITES_DIR, id);
+}
+
+function templatePath(id) {
+  return path.join(inviteDir(id), 'template.pdf');
+}
+
+function outputDir(id) {
+  return path.join(inviteDir(id), 'output');
+}
+
+function ensureInviteDirs(id) {
+  ensureDir(inviteDir(id));
+  ensureDir(outputDir(id));
+}
+
+function isLocalBaseUrl(url) {
+  return !url || /localhost|127\.0\.0\.1/i.test(url);
+}
+
+function normalizeBaseUrls() {
+  const d = get();
+  let changed = false;
+  if (isLocalBaseUrl(d.settings.baseUrl)) {
+    d.settings.baseUrl = DEFAULT_BASE_URL;
+    changed = true;
+  }
+  for (const inv of d.invites || []) {
+    if (isLocalBaseUrl(inv.baseUrl)) {
+      inv.baseUrl = DEFAULT_BASE_URL;
+      changed = true;
+    }
+  }
+  if (changed) save();
+}
+
+function migrateLegacy(d) {
+  if (d.invites && d.invites.length) return;
+
+  const legacyTemplate = path.join(DATA_DIR, 'template.pdf');
+  const legacyOutput = path.join(DATA_DIR, 'output');
+  const hasLegacy = (d.settings && d.settings.templateName)
+    || (d.invitees && d.invitees.length)
+    || fs.existsSync(legacyTemplate);
+
+  if (!hasLegacy) {
+    d.invites = [];
+    return;
+  }
+
+  const invite = defaultInvite(
+    (d.settings && d.settings.templateName)
+      ? d.settings.templateName.replace(/\.pdf$/i, '')
+      : 'My invitation'
+  );
+
+  if (d.settings) {
+    invite.templateName = d.settings.templateName || '';
+    invite.pageWidth = d.settings.pageWidth || 612;
+    invite.pageHeight = d.settings.pageHeight || 792;
+    invite.layout = d.settings.layout || null;
+    invite.names = d.settings.names || [];
+    invite.baseUrl = d.settings.baseUrl || '';
+  }
+  invite.invitees = d.invitees || [];
+  invite.rsvps = d.rsvps || [];
+
+  ensureInviteDirs(invite.id);
+  if (fs.existsSync(legacyTemplate)) {
+    fs.copyFileSync(legacyTemplate, templatePath(invite.id));
+  }
+  if (fs.existsSync(legacyOutput)) {
+    for (const f of fs.readdirSync(legacyOutput)) {
+      const src = path.join(legacyOutput, f);
+      const dest = path.join(outputDir(invite.id), f);
+      if (fs.statSync(src).isFile()) fs.copyFileSync(src, dest);
+    }
+  }
+
+  d.invites = [invite];
+  delete d.invitees;
+  delete d.rsvps;
+  if (d.settings) {
+    d.settings = { baseUrl: d.settings.baseUrl || DEFAULT_BASE_URL };
+  }
 }
 
 function load() {
-  ensureDir();
+  ensureDir(DATA_DIR);
+  ensureDir(INVITES_DIR);
   if (fs.existsSync(DB_FILE)) {
     try {
       db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-      // Merge in any new default keys without clobbering existing data.
       db.settings = Object.assign({}, DEFAULT_DB.settings, db.settings || {});
-      db.invitees = db.invitees || [];
-      db.rsvps = db.rsvps || [];
+      db.invites = db.invites || [];
+      migrateLegacy(db);
     } catch (err) {
       console.error('[store] db.json was unreadable, starting fresh:', err.message);
       db = JSON.parse(JSON.stringify(DEFAULT_DB));
@@ -56,21 +153,20 @@ function load() {
     db = JSON.parse(JSON.stringify(DEFAULT_DB));
     save();
   }
+  normalizeBaseUrls();
   return db;
 }
 
 function save() {
-  ensureDir();
+  ensureDir(DATA_DIR);
   fs.writeFileSync(TMP_FILE, JSON.stringify(db, null, 2));
-  fs.renameSync(TMP_FILE, DB_FILE); // atomic on the same filesystem
+  fs.renameSync(TMP_FILE, DB_FILE);
 }
 
 function get() {
   if (!db) load();
   return db;
 }
-
-// ---- settings -------------------------------------------------------------
 
 function getSettings() {
   return get().settings;
@@ -82,62 +178,148 @@ function updateSettings(patch) {
   return get().settings;
 }
 
-// ---- invitees -------------------------------------------------------------
+function getInvites() {
+  return get().invites;
+}
 
-function getInvitees() {
-  return get().invitees;
+function getInvite(id) {
+  return get().invites.find((i) => i.id === id) || null;
+}
+
+function touchInvite(invite) {
+  invite.updatedAt = new Date().toISOString();
+}
+
+function createInvite(title) {
+  const invite = defaultInvite(title);
+  get().invites.unshift(invite);
+  ensureInviteDirs(invite.id);
+  save();
+  return invite;
+}
+
+function updateInvite(id, patch) {
+  const invite = getInvite(id);
+  if (!invite) return null;
+  Object.assign(invite, patch);
+  touchInvite(invite);
+  save();
+  return invite;
+}
+
+function deleteInvite(id) {
+  const d = get();
+  const idx = d.invites.findIndex((i) => i.id === id);
+  if (idx < 0) return false;
+  d.invites.splice(idx, 1);
+  save();
+  const dir = inviteDir(id);
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  return true;
+}
+
+function previewGuestId(inviteId) {
+  return 'pv' + inviteId.slice(0, 8);
+}
+
+function ensurePreviewGuest(invite) {
+  if (invite.invitees.length && !invite.invitees.every((i) => i.preview)) {
+    return invite.invitees.find((i) => !i.preview) || invite.invitees[0];
+  }
+  const id = previewGuestId(invite.id);
+  let guest = invite.invitees.find((i) => i.id === id);
+  if (!guest) {
+    guest = {
+      id,
+      name: (invite.names && invite.names[0]) || 'Sample Guest',
+      createdAt: new Date().toISOString(),
+      pdfFile: '',
+      preview: true,
+      checkedIn: false,
+      checkedInAt: null
+    };
+    invite.invitees.push(guest);
+    touchInvite(invite);
+    save();
+  } else if (invite.names && invite.names[0] && guest.name !== invite.names[0]) {
+    guest.name = invite.names[0];
+    touchInvite(invite);
+    save();
+  }
+  return guest;
+}
+
+function findInvitee(id) {
+  for (const invite of get().invites) {
+    const invitee = invite.invitees.find((i) => i.id === id);
+    if (invitee) return { invite, invitee };
+  }
+  return null;
 }
 
 function getInvitee(id) {
-  return get().invitees.find((i) => i.id === id) || null;
+  const found = findInvitee(id);
+  return found ? found.invitee : null;
 }
 
-function replaceInvitees(list) {
-  get().invitees = list;
+function replaceInvitees(inviteId, list) {
+  const invite = getInvite(inviteId);
+  if (!invite) return null;
+  invite.invitees = list;
+  touchInvite(invite);
   save();
+  return invite.invitees;
 }
 
-function clearAll() {
-  const d = get();
-  d.invitees = [];
-  d.rsvps = [];
+function clearInviteBatch(inviteId) {
+  const invite = getInvite(inviteId);
+  if (!invite) return false;
+  invite.invitees = [];
+  invite.rsvps = [];
+  touchInvite(invite);
   save();
+  return true;
 }
 
 function setCheckedIn(id, value) {
-  const inv = getInvitee(id);
-  if (!inv) return null;
-  inv.checkedIn = !!value;
-  inv.checkedInAt = value ? new Date().toISOString() : null;
+  const found = findInvitee(id);
+  if (!found) return null;
+  found.invitee.checkedIn = !!value;
+  found.invitee.checkedInAt = value ? new Date().toISOString() : null;
+  touchInvite(found.invite);
   save();
-  return inv;
+  return found.invitee;
 }
 
-// ---- rsvps ----------------------------------------------------------------
-
-function getRsvp(inviteeId) {
-  return get().rsvps.find((r) => r.inviteeId === inviteeId) || null;
+function getRsvp(inviteId, inviteeId) {
+  const invite = getInvite(inviteId);
+  if (!invite) return null;
+  return invite.rsvps.find((r) => r.inviteeId === inviteeId) || null;
 }
 
 function upsertRsvp(inviteeId, status, comments) {
-  const d = get();
-  let r = d.rsvps.find((x) => x.inviteeId === inviteeId);
+  const found = findInvitee(inviteeId);
+  if (!found) return null;
+  const invite = found.invite;
+  let r = invite.rsvps.find((x) => x.inviteeId === inviteeId);
   if (!r) {
     r = { inviteeId, status, comments: comments || '', respondedAt: new Date().toISOString() };
-    d.rsvps.push(r);
+    invite.rsvps.push(r);
   } else {
     r.status = status;
     r.comments = comments || '';
     r.respondedAt = new Date().toISOString();
   }
+  touchInvite(invite);
   save();
   return r;
 }
 
-function getRsvpRows() {
-  const d = get();
-  return d.invitees.map((inv) => {
-    const r = d.rsvps.find((x) => x.inviteeId === inv.id);
+function getRsvpRows(inviteId) {
+  const invite = getInvite(inviteId);
+  if (!invite) return [];
+  return invite.invitees.map((inv) => {
+    const r = invite.rsvps.find((x) => x.inviteeId === inv.id);
     return {
       name: inv.name,
       id: inv.id,
@@ -150,18 +332,46 @@ function getRsvpRows() {
   });
 }
 
+function inviteSummary(invite) {
+  const yes = invite.rsvps.filter((r) => r.status === 'Yes').length;
+  return {
+    id: invite.id,
+    title: invite.title,
+    createdAt: invite.createdAt,
+    updatedAt: invite.updatedAt,
+    templateName: invite.templateName,
+    nameCount: (invite.names || []).length,
+    generatedCount: (invite.invitees || []).filter((i) => !i.preview).length,
+    rsvpYes: yes
+  };
+}
+
 module.exports = {
   DATA_DIR,
+  INVITES_DIR,
+  DEFAULT_BASE_URL,
   load,
   save,
+  inviteDir,
+  templatePath,
+  outputDir,
+  ensureInviteDirs,
   getSettings,
   updateSettings,
-  getInvitees,
+  getInvites,
+  getInvite,
+  createInvite,
+  updateInvite,
+  deleteInvite,
+  ensurePreviewGuest,
+  previewGuestId,
   getInvitee,
+  findInvitee,
   replaceInvitees,
-  clearAll,
+  clearInviteBatch,
   setCheckedIn,
   getRsvp,
   upsertRsvp,
-  getRsvpRows
+  getRsvpRows,
+  inviteSummary
 };

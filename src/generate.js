@@ -10,6 +10,7 @@ const {
   PDFString
 } = require('pdf-lib');
 const QRCode = require('qrcode');
+const fontkit = require('@pdf-lib/fontkit');
 
 // Map the admin's font choice to a pdf-lib standard font.
 // Standard fonts need no embedding and keep generated files small.
@@ -123,6 +124,7 @@ async function generateInvitation(opts) {
   const { templateBytes, name, id, baseUrl, layout } = opts;
 
   const doc = await PDFDocument.load(templateBytes);
+  doc.registerFontkit(fontkit);
   const page = doc.getPages()[0];
   const { width: W, height: H } = page.getSize();
 
