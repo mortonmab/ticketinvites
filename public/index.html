@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worship Moments · Invitation Studio</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- Login overlay (only shown if a password is configured) -->
+<div class="login" id="login">
+  <div class="card">
+    <div class="crown">♛</div>
+    <h2>Invitation Studio</h2>
+    <p>Enter the admin password to continue.</p>
+    <input type="password" id="loginPw" placeholder="Password" autocomplete="current-password">
+    <button class="btn primary" onclick="doLogin()">Unlock</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<div class="topbar">
+  <div class="brand">
+    <span class="crown">♛</span>
+    <div><b>Invitation Studio</b><small>Worship Moments 2026</small></div>
+  </div>
+  <div class="spacer"></div>
+  <div class="baseurl">
+    <span>Public link</span>
+    <input type="text" id="baseUrl" placeholder="https://your-domain.com" title="The public address where this app is reachable. QR codes and RSVP links use this.">
+  </div>
+  <span class="lock" id="lock">Secured</span>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="design" onclick="switchTab('design')">Design &amp; Generate</div>
+  <div class="tab" data-tab="responses" onclick="switchTab('responses')">RSVP Responses</div>
+</div>
+
+<!-- ===================== DESIGN TAB ===================== -->
+<div id="tab-design">
+<div class="layout">
+  <div class="rail">
+
+    <div class="step">
+      <h3><span class="n">1</span> Invitation template</h3>
+      <p class="hint">Upload the Worship Moments PDF once. Everything is placed on top of it.</p>
+      <label class="file-drop" id="tplDrop" for="tplInput">
+        <div class="ic">📄</div>
+        <div class="t" id="tplTitle">Choose PDF template</div>
+        <div class="s" id="tplSub">PDF · single page</div>
+      </label>
+      <input type="file" id="tplInput" accept="application/pdf">
+    </div>
+
+    <div class="step">
+      <h3><span class="n">2</span> Guest names</h3>
+      <p class="hint">Upload an Excel (.xlsx) or CSV with one column of invitee names. No other data needed.</p>
+      <label class="file-drop" id="xlsDrop" for="xlsInput">
+        <div class="ic">📋</div>
+        <div class="t" id="xlsTitle">Choose Excel / CSV</div>
+        <div class="s" id="xlsSub">First column = Invitee Name</div>
+      </label>
+      <input type="file" id="xlsInput" accept=".xlsx,.xls,.csv">
+    </div>
+
+    <div class="step" id="posStep">
+      <h3><span class="n">3</span> Position &amp; style</h3>
+      <p class="hint">Drag each element onto the template. Drag the gold dot to resize. Selected: <b id="selName">Name</b></p>
+
+      <div class="fieldrow col">
+        <label>Name font</label>
+        <select id="nameFont">
+          <option value="Invitation-Script">Invitation Script</option>
+          <option value="Times">Times</option>
+          <option value="Times-Bold">Times Bold</option>
+          <option value="Times-Italic">Times Italic</option>
+          <option value="Times-BoldItalic">Times Bold Italic</option>
+          <option value="Helvetica">Helvetica</option>
+          <option value="Helvetica-Bold">Helvetica Bold</option>
+          <option value="Helvetica-Italic">Helvetica Italic</option>
+          <option value="Helvetica-BoldItalic">Helvetica Bold Italic</option>
+          <option value="Courier">Courier</option>
+          <option value="Courier-Bold">Courier Bold</option>
+        </select>
+      </div>
+      <div class="inline" style="margin-top:10px">
+        <div>
+          <label style="font-size:12px;color:var(--muted)">Size (pt)</label>
+          <input type="number" id="nameSize" min="8" max="120" value="30">
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--muted)">Align</label>
+          <select id="nameAlign">
+            <option value="center">Center</option>
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+        </div>
+        <div style="flex:0 0 auto">
+          <label style="font-size:12px;color:var(--muted)">Colour</label>
+          <input type="color" id="nameColor" value="#1a1a1a">
+        </div>
+      </div>
+
+      <div class="fieldrow" style="margin-top:16px">
+        <label>QR size</label>
+        <input type="range" id="qrSize" min="6" max="40" value="16">
+        <span class="val" id="qrSizeVal">16%</span>
+      </div>
+
+      <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--line-2)">
+        <label class="toggle"><input type="checkbox" id="rsvpEnabled"> Clickable RSVP button</label>
+        <div id="rsvpControls" class="hidden">
+          <div class="fieldrow col" style="margin-top:11px">
+            <label>Button text</label>
+            <input type="text" id="rsvpLabel" value="RSVP HERE" maxlength="40">
+          </div>
+          <div class="inline" style="margin-top:10px">
+            <div>
+              <label style="font-size:12px;color:var(--muted)">Size (pt)</label>
+              <input type="number" id="rsvpSize" min="8" max="40" value="13">
+            </div>
+            <div style="flex:0 0 auto">
+              <label style="font-size:12px;color:var(--muted)">Button</label>
+              <input type="color" id="rsvpBg" value="#b8860b">
+            </div>
+            <div style="flex:0 0 auto">
+              <label style="font-size:12px;color:var(--muted)">Text</label>
+              <input type="color" id="rsvpFg" value="#ffffff">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <h3><span class="n">4</span> Preview &amp; generate</h3>
+      <p class="hint">Preview renders a real PDF with the first name, so what you see is exact.</p>
+      <button class="btn ghost" id="previewBtn" onclick="doPreview()">Preview sample invitation</button>
+      <div class="btnrow">
+        <button class="btn primary" id="genBtn" onclick="doGenerate()">Generate all invitations</button>
+      </div>
+      <div class="busy" id="genBusy"><span class="spin"></span><span id="genBusyTxt">Generating…</span></div>
+      <div class="btnrow" id="afterGen" style="display:none">
+        <button class="btn primary sm" style="flex:1" onclick="downloadZip()">Download ZIP</button>
+        <button class="btn ghost sm" style="flex:1" onclick="switchTab('responses')">View list</button>
+      </div>
+      <button class="btn ghost sm" style="margin-top:11px; color:var(--no)" onclick="doReset()">Reset everything</button>
+    </div>
+
+  </div>
+
+  <div class="stagewrap">
+    <div class="stage-head">
+      <div class="legend">
+        <span><i style="background:#2f6fed"></i>Name</span>
+        <span><i style="background:#1f7a3d"></i>QR code</span>
+        <span><i style="background:var(--gold)"></i>RSVP</span>
+      </div>
+      <span style="font-size:12px;color:var(--muted)" id="dims"></span>
+    </div>
+    <div id="stageHost">
+      <div class="empty-stage" id="emptyStage"><div>Upload a template to begin positioning</div></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ===================== RESPONSES TAB ===================== -->
+<div id="tab-responses" class="hidden">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>RSVP Responses</h2>
+      <div>
+        <button class="btn ghost sm" onclick="loadResponses()">Refresh</button>
+        <button class="btn primary sm" onclick="exportRsvps()">Export to Excel</button>
+      </div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div id="respTableWrap"></div>
+  </div>
+</div>
+
+<!-- preview modal -->
+<div class="scrim" id="previewScrim">
+  <div class="modal">
+    <div class="modal-head"><h3>Sample invitation</h3><button class="x" onclick="closePreview()">×</button></div>
+    <div class="modal-body"><iframe id="previewFrame" title="Preview"></iframe></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/vendor/pdf.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
