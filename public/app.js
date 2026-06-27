@@ -19,7 +19,12 @@ const state = {
   hasTemplate: false,
   layout: JSON.parse(JSON.stringify(DEFAULT_LAYOUT)),
   selected: 'name',
-  generatedCount: 0
+  generatedCount: 0,
+  checkinEventId: null,
+  checkinGuest: null,
+  checkinSearchResults: [],
+  allInvites: [],
+  seatsRemaining: 0
 };
 
 function api(path) {
@@ -32,7 +37,15 @@ function authFetch(url, opts) {
   opts = opts || {};
   opts.headers = opts.headers || {};
   if (state.token) opts.headers['x-admin-token'] = state.token;
-  return fetch(url, opts);
+  return fetch(url, opts).then((r) => {
+    if (r.status === 401 && !String(url).includes('/admin/login')) {
+      state.token = '';
+      localStorage.removeItem('wm_token');
+      $('login').classList.add('show');
+      toast('Session expired — log in again', true);
+    }
+    return r;
+  });
 }
 
 let toastTimer;
@@ -122,8 +135,15 @@ function fontCss(key) {
  * Auth + boot + routing
  * ------------------------------------------------------------------ */
 async function boot() {
-  const r = await authFetch('/admin/config');
-  if (r.status === 401) { $('login').classList.add('show'); return; }
+  const r = await fetch('/admin/config', {
+    headers: state.token ? { 'x-admin-token': state.token } : {}
+  });
+  if (r.status === 401) {
+    state.token = '';
+    localStorage.removeItem('wm_token');
+    $('login').classList.add('show');
+    return;
+  }
   const cfg = await r.json();
   state.authRequired = cfg.authRequired;
   $('baseUrl').value = cfg.baseUrl || '';
@@ -151,14 +171,18 @@ function parseRoute() {
   const hash = (location.hash || '#/').replace(/^#\/?/, '');
   const parts = hash.split('/').filter(Boolean);
   if (!parts.length || parts[0] === 'home') return { view: 'home' };
+  if (parts[0] === 'checkin') return { view: 'checkin' };
   if (parts[0] === 'invite' && parts[1]) {
-    return { view: 'editor', id: parts[1], tab: parts[2] === 'responses' ? 'responses' : 'design' };
+    const tab = ['responses', 'checkin'].includes(parts[2]) ? parts[2] : 'design';
+    return { view: tab === 'checkin' ? 'checkin' : 'editor', id: parts[1], tab };
   }
   return { view: 'home' };
 }
 
 function setRoute(view, id, tab) {
   if (view === 'home') location.hash = '#/';
+  else if (view === 'checkin' && id) location.hash = '#/invite/' + id + '/checkin';
+  else if (view === 'checkin') location.hash = '#/checkin';
   else location.hash = '#/invite/' + id + (tab === 'responses' ? '/responses' : '');
 }
 
@@ -170,6 +194,11 @@ function handleRoute() {
     loadHome();
     return;
   }
+  if (route.view === 'checkin') {
+    showView('checkin');
+    loadCheckin(route.id);
+    return;
+  }
   openInvite(route.id, route.tab, true);
 }
 
@@ -179,15 +208,17 @@ window.addEventListener('hashchange', () => {
 
 function showView(view) {
   const inEditor = view === 'editor';
-  $('tab-home').classList.toggle('hidden', inEditor);
+  const inCheckin = view === 'checkin';
+  $('tab-home').classList.toggle('hidden', inEditor || inCheckin);
   $('tab-design').classList.toggle('hidden', !inEditor);
-  $('tab-responses').classList.toggle('hidden', true);
+  $('tab-responses').classList.toggle('hidden', !inEditor);
+  $('tab-checkin').classList.toggle('hidden', !inCheckin);
+  $('tabHomeBtn').classList.toggle('hidden', inEditor);
+  $('tabCheckinBtn').classList.toggle('hidden', false);
   $('tabDesignBtn').classList.toggle('hidden', !inEditor);
   $('tabResponsesBtn').classList.toggle('hidden', !inEditor);
-  $('mainTabs').classList.toggle('hidden', !inEditor);
-  const homeTab = document.querySelector('.tab[data-tab="home"]');
-  if (homeTab) homeTab.classList.toggle('hidden', inEditor);
-  if (!inEditor) {
+  $('mainTabs').classList.remove('hidden');
+  if (!inEditor && !inCheckin) {
     document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === 'home'));
   }
 }
@@ -276,6 +307,10 @@ async function openInvite(id, tab, fromRoute) {
     $('dims').textContent = '';
   }
   if (!fromRoute) setRoute('editor', id, tab || 'design');
+  if (tab === 'checkin') {
+    switchTab('checkin', true);
+    return;
+  }
   switchTab(tab || 'design', true);
 }
 
@@ -293,10 +328,19 @@ async function saveTitle() {
  * ------------------------------------------------------------------ */
 function switchTab(tab, fromRoute) {
   if (tab === 'home') { goHome(); return; }
+  if (tab === 'checkin') {
+    if (!fromRoute) setRoute('checkin', state.inviteId);
+    showView('checkin');
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === 'checkin'));
+    loadCheckin(state.inviteId);
+    return;
+  }
   if (!state.inviteId) return;
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
   $('tab-design').classList.toggle('hidden', tab !== 'design');
   $('tab-responses').classList.toggle('hidden', tab !== 'responses');
+  $('tab-checkin').classList.add('hidden');
+  showView('editor');
   if (tab === 'responses') loadResponses();
   if (!fromRoute) setRoute('editor', state.inviteId, tab);
 }
@@ -708,16 +752,358 @@ async function loadResponses() {
     <td><span class="pill ${x.status}">${x.status}</span></td>
     <td>${x.respondedAt ? new Date(x.respondedAt).toLocaleString() : '—'}</td>
     <td>${x.checkedIn === 'Yes' ? '✓' : '—'}</td>
+    <td class="seat">${escapeHtml(x.seatNumbers || '—')}</td>
     <td>${escapeHtml(x.comments || '')}</td>
     <td><a class="linkbtn" href="javascript:void(0)" onclick="downloadPdf('${x.id}', '${escapeAttr(x.name)}')">PDF</a></td>
   </tr>`).join('');
   $('respTableWrap').innerHTML = `<table><thead><tr>
-    <th>Invitee name</th><th>ID</th><th>RSVP</th><th>Responded</th><th>In</th><th>Comments</th><th></th>
+    <th>Invitee name</th><th>ID</th><th>RSVP</th><th>Responded</th><th>In</th><th>Seats</th><th>Comments</th><th></th>
   </tr></thead><tbody>${body}</tbody></table>`;
 }
 
+/* ------------------------------------------------------------------ *
+ * Check-in tab
+ * ------------------------------------------------------------------ */
+let checkinSearchTimer;
+
+async function loadCheckin(preselectInviteId) {
+  const [invR, evtR] = await Promise.all([
+    authFetch('/admin/invites'),
+    authFetch('/admin/checkin/events')
+  ]);
+  if (!invR.ok) return;
+  const invData = await invR.json();
+  state.allInvites = invData.invites || [];
+  const evtData = evtR.ok ? await evtR.json() : { events: [] };
+  const events = evtData.events || [];
+
+  renderCheckinInvitePick(preselectInviteId);
+
+  const sel = $('checkinEventSelect');
+  sel.innerHTML = events.length
+    ? events.map((e) => `<option value="${e.id}">${escapeHtml(e.title)} (${e.checkedInCount} in)</option>`).join('')
+    : '<option value="">— Create an event below —</option>';
+
+  if (events.length) {
+    const pick = state.checkinEventId && events.find((e) => e.id === state.checkinEventId)
+      ? state.checkinEventId : events[0].id;
+    sel.value = pick;
+    state.checkinEventId = pick;
+    await onCheckinEventChange(false);
+  } else {
+    state.checkinEventId = null;
+    $('checkinEventTitle').value = 'Worship Moments 2026';
+    $('seatPlanStatus').textContent = '';
+    if (preselectInviteId) {
+      document.querySelectorAll('#checkinInvitePick input').forEach((cb) => {
+        cb.checked = cb.value === preselectInviteId;
+      });
+    }
+    renderCheckinTable([]);
+    renderCheckinStats(null, []);
+  }
+
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === 'checkin'));
+}
+
+function renderCheckinInvitePick(preselectInviteId) {
+  const box = $('checkinInvitePick');
+  if (!state.allInvites.length) {
+    box.innerHTML = '<div style="font-size:13px;color:var(--muted)">No invitations yet.</div>';
+    return;
+  }
+  box.innerHTML = state.allInvites.map((inv) => {
+    const checked = preselectInviteId === inv.id ? ' checked' : '';
+    return `<label><input type="checkbox" value="${inv.id}"${checked}> ${escapeHtml(inv.title)} <span style="color:var(--muted)">(${inv.generatedCount || 0} guests)</span></label>`;
+  }).join('');
+}
+
+function selectedCheckinInviteIds() {
+  return Array.from(document.querySelectorAll('#checkinInvitePick input:checked')).map((el) => el.value);
+}
+
+async function onCheckinEventChange(reloadGuests) {
+  const id = $('checkinEventSelect').value;
+  if (!id) return;
+  state.checkinEventId = id;
+  const r = await authFetch('/admin/checkin/events/' + id + '/guests');
+  if (!r.ok) return;
+  const d = await r.json();
+  const evt = d.event;
+  $('checkinEventTitle').value = evt.title;
+  const total = evt.seatPoolCount || 0;
+  const remaining = evt.seatsRemaining != null ? evt.seatsRemaining : total;
+  $('seatPlanStatus').textContent = total
+    ? `${total} seats in pool · ${remaining} remaining · ${evt.seatsUsed || 0} assigned at check-in`
+    : 'No seat pool uploaded yet — download the template and list your available seats.';
+  $('seatPlanStatus').className = 'seat-plan-status' + (total ? ' ok' : '');
+  renderCheckinInvitePick();
+  document.querySelectorAll('#checkinInvitePick input').forEach((cb) => {
+    cb.checked = (evt.inviteIds || []).includes(cb.value);
+  });
+  renderCheckinTable(d.guests || []);
+  renderCheckinStats(evt, d.guests || []);
+  state.seatsRemaining = evt.seatsRemaining != null ? evt.seatsRemaining : 0;
+  if (reloadGuests !== false) {
+    state.checkinGuest = null;
+    $('checkinSelected').classList.add('hidden');
+    $('checkinResults').innerHTML = '';
+    $('checkinSearch').value = '';
+  }
+}
+
+function createNewCheckinEvent() {
+  state.checkinEventId = null;
+  $('checkinEventSelect').innerHTML = '<option value="">— New event —</option>';
+  $('checkinEventSelect').value = '';
+  $('checkinEventTitle').value = 'Worship Moments 2026';
+  $('seatPlanStatus').textContent = '';
+  renderCheckinInvitePick(state.inviteId);
+  if (state.inviteId) {
+    document.querySelectorAll('#checkinInvitePick input').forEach((cb) => {
+      cb.checked = cb.value === state.inviteId;
+    });
+  }
+  renderCheckinTable([]);
+  renderCheckinStats(null, []);
+  state.checkinGuest = null;
+  $('checkinSelected').classList.add('hidden');
+  $('checkinResults').innerHTML = '';
+}
+
+async function saveCheckinEvent(silent) {
+  const inviteIds = selectedCheckinInviteIds();
+  if (!inviteIds.length) { toast('Select at least one invitation batch', true); return false; }
+  const title = $('checkinEventTitle').value.trim() || 'Event check-in';
+  const body = { title, inviteIds };
+
+  let r;
+  if (state.checkinEventId) {
+    r = await authFetch('/admin/checkin/events/' + state.checkinEventId, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } else {
+    r = await authFetch('/admin/checkin/events', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  }
+  const d = await r.json();
+  if (!r.ok) { toast((d && d.error) || 'Could not save event', true); return false; }
+  state.checkinEventId = d.event.id;
+  if (!silent) toast('Check-in event saved');
+  if (!silent) {
+    await loadCheckin();
+    $('checkinEventSelect').value = state.checkinEventId;
+  }
+  await onCheckinEventChange(false);
+  return true;
+}
+
+function renderCheckinStats(evt, guests) {
+  const totalInvites = evt ? (evt.inviteIds || []).length : 0;
+  const checkedIn = (guests || []).length;
+  const totalSeats = evt ? (evt.seatPoolCount || 0) : 0;
+  const remaining = evt ? (evt.seatsRemaining != null ? evt.seatsRemaining : totalSeats) : 0;
+  $('checkinStats').innerHTML = [
+    ['Invitations', totalInvites], ['Seat pool', totalSeats], ['Remaining', remaining], ['Checked in', checkedIn]
+  ].map(([l, n]) => `<div class="stat"><div class="num">${n}</div><div class="lbl">${l}</div></div>`).join('');
+}
+
+function renderCheckinTable(rows) {
+  if (!rows.length) {
+    $('checkinTableWrap').innerHTML = '<div class="empty-stage" style="aspect-ratio:auto;padding:32px"><div>No guests checked in yet for this event.</div></div>';
+    return;
+  }
+  const body = rows.map((x) => `<tr>
+    <td class="seat">${formatSeatsList(x.seatNumbers)}</td>
+    <td>${escapeHtml(x.name)}</td>
+    <td class="id">${x.id}</td>
+    <td>${escapeHtml(x.inviteTitle)}</td>
+    <td><span class="pill ${x.status}">${x.status}</span></td>
+    <td>${x.checkedInAt ? new Date(x.checkedInAt).toLocaleString() : '—'}</td>
+    <td><a class="linkbtn" href="javascript:void(0)" onclick="undoCheckinGuest('${x.id}')">Undo</a></td>
+  </tr>`).join('');
+  $('checkinTableWrap').innerHTML = `<table><thead><tr>
+    <th>Seats</th><th>Guest</th><th>ID</th><th>Invitation</th><th>RSVP</th><th>Time</th><th></th>
+  </tr></thead><tbody>${body}</tbody></table>`;
+}
+
+async function downloadSeatTemplate() {
+  const inviteIds = selectedCheckinInviteIds();
+  if (!inviteIds.length) { toast('Select at least one invitation batch first', true); return; }
+  if (!state.checkinEventId && !(await saveCheckinEvent(true))) return;
+  const r = await authFetch('/admin/checkin/events/' + state.checkinEventId + '/seats-template');
+  if (!r.ok) { toast('Could not download template — save the event and try again', true); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'seat-plan-template.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+$('seatPlanInput') && $('seatPlanInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!state.checkinEventId && !(await saveCheckinEvent(true))) { e.target.value = ''; return; }
+  const fd = new FormData();
+  fd.append('excel', file);
+  const r = await authFetch('/admin/checkin/events/' + state.checkinEventId + '/seats', { method: 'POST', body: fd });
+  const d = await r.json();
+  e.target.value = '';
+  if (!r.ok) { toast((d && d.error) || 'Upload failed', true); return; }
+  let msg = d.count + ' seat' + (d.count === 1 ? '' : 's') + ' in pool';
+  if (d.skipped) msg += ' (' + d.skipped + ' empty rows skipped)';
+  toast(msg);
+  await onCheckinEventChange(false);
+});
+
+$('checkinSearch') && $('checkinSearch').addEventListener('input', () => {
+  clearTimeout(checkinSearchTimer);
+  checkinSearchTimer = setTimeout(runCheckinSearch, 250);
+});
+
+$('checkinSearch') && $('checkinSearch').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); runCheckinSearch(); }
+});
+
+async function runCheckinSearch() {
+  const q = $('checkinSearch').value.trim();
+  const inviteIds = selectedCheckinInviteIds();
+  if (!q) { $('checkinResults').innerHTML = ''; return; }
+  if (!inviteIds.length) { toast('Select invitation batches first', true); return; }
+  const r = await authFetch('/admin/checkin/search?inviteIds=' + encodeURIComponent(inviteIds.join(',')) + '&eventId=' + encodeURIComponent(state.checkinEventId || '') + '&q=' + encodeURIComponent(q));
+  const d = await r.json();
+  if (!r.ok) { toast((d && d.error) || 'Search failed', true); return; }
+  const results = d.results || [];
+  if (!results.length) {
+    $('checkinResults').innerHTML = '<div style="font-size:13px;color:var(--muted);padding:8px 4px">No matching guests.</div>';
+    return;
+  }
+  $('checkinResults').innerHTML = results.map((g) => `<div class="checkin-result" onclick="selectCheckinGuestById('${g.id}')">
+    <div><div class="name">${escapeHtml(g.name)}</div><div class="meta">${escapeHtml(g.inviteTitle)} · ${g.id}${g.checkedIn && g.seatNumbers && g.seatNumbers.length ? ' · Seats ' + formatSeatsList(g.seatNumbers) : ''}</div></div>
+    <span class="pill ${g.status}">${g.status}</span>
+  </div>`).join('');
+  state.checkinSearchResults = results;
+}
+
+function selectCheckinGuestById(id) {
+  const g = state.checkinSearchResults.find((x) => x.id === id);
+  if (g) selectCheckinGuest(g);
+}
+
+function selectCheckinGuest(g) {
+  state.checkinGuest = g;
+  const box = $('checkinSelected');
+  box.classList.remove('hidden');
+  const remaining = state.seatsRemaining;
+  const seatInfo = g.checkedIn && g.seatNumbers && g.seatNumbers.length
+    ? `Checked in — Seats <b>${formatSeatsList(g.seatNumbers)}</b>`
+    : `<span>${remaining} seat(s) remaining in pool</span>`;
+  box.innerHTML = `
+    <div class="name">${escapeHtml(g.name)}</div>
+    <div class="meta">${escapeHtml(g.inviteTitle)}<br>ID: ${g.id}<br>RSVP: ${g.status}<br>${seatInfo}</div>
+    <div class="fieldrow col" style="margin-top:10px">
+      <label>Seats to assign (1 = guest only, 2 = plus-one, etc.)</label>
+      <input type="number" id="checkinSeatCount" min="1" max="10" value="1">
+    </div>
+    <div class="btnrow">
+      <button class="btn primary" onclick="doCheckinGuest()">${g.checkedIn ? 'Show assigned seats' : 'Check in & assign seats'}</button>
+      ${g.checkedIn ? `<button class="btn ghost" onclick="undoCheckinGuest('${g.id}')">Undo check-in</button>` : ''}
+    </div>`;
+  $('checkinResults').innerHTML = '';
+}
+
+async function doCheckinGuest() {
+  if (!state.checkinGuest) return;
+  if (!state.checkinEventId) { toast('Save a check-in event first', true); return; }
+  const seatCount = Math.max(1, parseInt($('checkinSeatCount')?.value, 10) || 1);
+  const r = await authFetch('/admin/checkin/checkin', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inviteeId: state.checkinGuest.id, eventId: state.checkinEventId, seatCount })
+  });
+  const d = await r.json();
+  if (!r.ok) { toast((d && d.error) || 'Check-in failed', true); return; }
+  showSeatModal(d.invitee.name, d.seatNumbers, d.inviteTitle, d.already, d.seatsRemaining);
+  $('checkinSearch').value = '';
+  state.checkinGuest = null;
+  $('checkinSelected').classList.add('hidden');
+  await onCheckinEventChange(false);
+}
+
+async function undoCheckinGuest(inviteeId) {
+  if (!state.checkinEventId) return;
+  if (!confirm('Undo check-in for this guest?')) return;
+  const r = await authFetch('/admin/checkin/undo', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inviteeId, eventId: state.checkinEventId })
+  });
+  const d = await r.json();
+  if (!r.ok) { toast((d && d.error) || 'Undo failed', true); return; }
+  toast('Check-in removed');
+  state.checkinGuest = null;
+  $('checkinSelected').classList.add('hidden');
+  await onCheckinEventChange(false);
+}
+
+function showSeatModal(name, seats, inviteTitle, already, remaining) {
+  const list = Array.isArray(seats) ? seats : (seats != null ? [String(seats)] : []);
+  $('seatGuestName').textContent = name;
+  if (list.length === 1) {
+    $('seatNumber').textContent = list[0];
+    $('seatNumber').style.fontSize = '';
+    $('seatList').textContent = '';
+  } else if (list.length > 1) {
+    $('seatNumber').textContent = list.join(' · ');
+    $('seatNumber').style.fontSize = '42px';
+    $('seatList').textContent = list.length + ' seats assigned (including plus-one)';
+  } else {
+    $('seatNumber').textContent = '—';
+  }
+  let meta = (already ? 'Already checked in · ' : '') + inviteTitle;
+  if (remaining != null) meta += ' · ' + remaining + ' seats left';
+  $('seatGuestMeta').textContent = meta;
+  $('seatScrim').classList.add('show');
+}
+
+function closeSeatModal() {
+  $('seatScrim').classList.remove('show');
+  $('checkinSearch').focus();
+}
+
+function formatSeatsList(seats) {
+  if (!seats || !seats.length) return '—';
+  return seats.join(', ');
+}
 function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/_/g, ' '); }
+
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  $('installBtn').classList.remove('hidden');
+});
+
+async function installApp() {
+  if (!deferredInstallPrompt) {
+    toast('Use Chrome menu → Install app, or Add to Home screen', false);
+    return;
+  }
+  deferredInstallPrompt.prompt();
+  const { outcome } = await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  $('installBtn').classList.add('hidden');
+  if (outcome === 'accepted') toast('App installed — open it from your home screen');
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
 
 window.addEventListener('resize', () => { if (state.hasTemplate) renderTemplate(); });
 boot();

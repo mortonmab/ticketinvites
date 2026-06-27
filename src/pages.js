@@ -98,11 +98,19 @@ function rsvpThanks(inv, status) {
   <a href="/r/${esc(inv.id)}" style="text-decoration:none"><button>Update my response</button></a>`);
 }
 
+function formatSeatBadge(inv) {
+  const seats = inv.seatNumbers && inv.seatNumbers.length
+    ? inv.seatNumbers
+    : (inv.seatNumber != null ? [String(inv.seatNumber)] : []);
+  if (!seats.length) return '';
+  return ' · Seat' + (seats.length > 1 ? 's' : '') + ' ' + esc(seats.join(', '));
+}
+
 function verifyPage(inv, rsvp, authRequired) {
   const status = rsvp ? rsvp.status : 'Pending';
   const pillClass = status === 'Yes' ? 'yes' : status === 'No' ? 'no' : 'pending';
   const checkedBadge = inv.checkedIn
-    ? `<div class="center" style="margin-top:6px"><span class="pill yes">✓ Checked in${inv.checkedInAt ? ' · ' + esc(new Date(inv.checkedInAt).toLocaleString()) : ''}</span></div>`
+    ? `<div class="center" style="margin-top:6px"><span class="pill yes">✓ Checked in${inv.checkedInAt ? ' · ' + esc(new Date(inv.checkedInAt).toLocaleString()) : ''}${formatSeatBadge(inv)}</span></div>`
     : '';
   return SHELL('Entrance Verification', `
   <div class="kicker" style="margin-top:8px">Entrance Verification</div>

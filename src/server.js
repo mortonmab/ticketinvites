@@ -123,6 +123,49 @@ async function parseNames(file) {
   return names;
 }
 
+function cellText(cell) {
+  if (cell == null) return '';
+  if (typeof cell === 'object' && cell.richText) {
+    return cell.richText.map((t) => t.text).join('').trim();
+  }
+  return String(cell).trim();
+}
+
+async function parseSeatPlan(file) {
+  const lower = (file.originalname || '').toLowerCase();
+  const rows = [];
+  if (lower.endsWith('.csv')) {
+    const lines = file.buffer.toString('utf8').split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const parts = lines[i].split(',').map((c) => c.replace(/^"|"$/g, '').trim());
+      if (!parts.some(Boolean)) continue;
+      if (i === 0 && /seat|section/i.test(parts[0])) continue;
+      rows.push({ seat: parts[0] || '', section: parts[1] || '' });
+    }
+  } else {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(file.buffer);
+    const ws = wb.worksheets[0];
+    if (!ws) return rows;
+    let seatCol = 1;
+    let sectionCol = 2;
+    const headerRow = ws.getRow(1);
+    headerRow.eachCell((cell, col) => {
+      const h = cellText(cell.value).toLowerCase();
+      if (/seat/.test(h)) seatCol = col;
+      else if (/section|area|zone|notes/.test(h)) sectionCol = col;
+    });
+    ws.eachRow((row, rowNum) => {
+      if (rowNum === 1) return;
+      const seat = cellText(row.getCell(seatCol).value);
+      const section = cellText(row.getCell(sectionCol).value);
+      if (!seat && !section) return;
+      rows.push({ seat, section });
+    });
+  }
+  return rows;
+}
+
 function inviteConfig(req, invite) {
   return {
     id: invite.id,
@@ -271,7 +314,7 @@ app.post('/admin/invites/:id/generate', requireAdmin, requireInvite, async (req,
       fs.writeFileSync(path.join(outDir, file), Buffer.from(bytes));
       invitees.push({
         id, name, createdAt: new Date().toISOString(), pdfFile: file,
-        checkedIn: false, checkedInAt: null
+        checkedIn: false, checkedInAt: null, seatNumbers: null, checkinEventId: null
       });
     }
     store.replaceInvitees(inviteId, invitees);
@@ -320,7 +363,8 @@ app.get('/admin/invites/:id/rsvps.xlsx', requireAdmin, requireInvite, async (req
     { header: 'RSVP Date & Time', key: 'respondedAt', width: 24 },
     { header: 'Comments', key: 'comments', width: 40 },
     { header: 'Checked In', key: 'checkedIn', width: 12 },
-    { header: 'Check-in Time', key: 'checkedInAt', width: 24 }
+    { header: 'Check-in Time', key: 'checkedInAt', width: 24 },
+    { header: 'Seats', key: 'seatNumbers', width: 18 }
   ];
   ws.getRow(1).font = { bold: true };
   rows.forEach((r) => ws.addRow(r));
@@ -338,6 +382,108 @@ app.post('/admin/invites/:id/reset', requireAdmin, requireInvite, (req, res) => 
   }
   store.clearInviteBatch(req.params.id);
   res.json({ ok: true });
+});
+
+app.get('/admin/checkin/events', requireAdmin, (req, res) => {
+  res.json({ events: store.getCheckinEvents().map(store.checkinEventSummary) });
+});
+
+app.post('/admin/checkin/events', requireAdmin, (req, res) => {
+  const { title, inviteIds } = req.body || {};
+  const ids = Array.isArray(inviteIds) ? inviteIds.filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ error: 'Select at least one invitation.' });
+  const evt = store.createCheckinEvent(
+    title ? String(title).trim() : 'Event check-in',
+    ids
+  );
+  res.json({ event: store.checkinEventSummary(evt) });
+});
+
+app.patch('/admin/checkin/events/:id', requireAdmin, (req, res) => {
+  const evt = store.updateCheckinEvent(req.params.id, req.body || {});
+  if (!evt) return res.status(404).json({ error: 'Event not found' });
+  res.json({ event: store.checkinEventSummary(evt) });
+});
+
+app.delete('/admin/checkin/events/:id', requireAdmin, (req, res) => {
+  if (!store.deleteCheckinEvent(req.params.id)) {
+    return res.status(404).json({ error: 'Event not found' });
+  }
+  res.json({ ok: true });
+});
+
+app.get('/admin/checkin/events/:id/guests', requireAdmin, (req, res) => {
+  const evt = store.getCheckinEvent(req.params.id);
+  if (!evt) return res.status(404).json({ error: 'Event not found' });
+  res.json({
+    event: store.checkinEventSummary(evt),
+    guests: store.getCheckinRows(req.params.id)
+  });
+});
+
+app.get('/admin/checkin/search', requireAdmin, (req, res) => {
+  const inviteIds = String(req.query.inviteIds || '').split(',').filter(Boolean);
+  const eventId = req.query.eventId || '';
+  const q = req.query.q || '';
+  if (!inviteIds.length) return res.status(400).json({ error: 'No invitations selected.' });
+  res.json({ results: store.searchCheckinGuests(inviteIds, q, eventId || null) });
+});
+
+app.get('/admin/checkin/events/:id/seats-template', requireAdmin, async (req, res) => {
+  const evt = store.getCheckinEvent(req.params.id);
+  if (!evt) return res.status(404).json({ error: 'Event not found' });
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Available Seats');
+  ws.columns = [
+    { header: 'Seat Number', key: 'seat', width: 16 },
+    { header: 'Section (optional)', key: 'section', width: 22 }
+  ];
+  ws.getRow(1).font = { bold: true };
+  ws.getCell('A1').note = 'List every available seat — one per row. Seats are assigned when guests check in, not before.';
+  const existing = evt.seatPool || [];
+  if (existing.length) {
+    for (const seat of existing) ws.addRow({ seat, section: '' });
+  } else {
+    for (let i = 1; i <= 50; i++) ws.addRow({ seat: String(i), section: '' });
+  }
+  const safeTitle = safeFileName(evt.title) || 'seat-pool';
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}-seats-template.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+});
+
+app.post('/admin/checkin/events/:id/seats', requireAdmin, upload.single('excel'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const rows = await parseSeatPlan(req.file);
+    if (!rows.length) return res.status(400).json({ error: 'No seat rows found in the file.' });
+    const result = store.importSeatPlan(req.params.id, rows);
+    if (result.error) return res.status(400).json({ error: result.error });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: 'Could not read spreadsheet: ' + err.message });
+  }
+});
+
+app.post('/admin/checkin/checkin', requireAdmin, (req, res) => {
+  const { inviteeId, eventId, seatCount } = req.body || {};
+  if (!inviteeId || !eventId) {
+    return res.status(400).json({ error: 'Guest and event are required.' });
+  }
+  const result = store.checkInGuest(inviteeId, eventId, seatCount);
+  if (result.error) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.post('/admin/checkin/undo', requireAdmin, (req, res) => {
+  const { inviteeId, eventId } = req.body || {};
+  if (!inviteeId || !eventId) {
+    return res.status(400).json({ error: 'Guest and event are required.' });
+  }
+  const result = store.undoCheckin(inviteeId, eventId);
+  if (result.error) return res.status(400).json({ error: result.error });
+  res.json(result);
 });
 
 app.get('/r/:id', (req, res) => {
@@ -372,11 +518,28 @@ app.post('/v/:id/checkin', (req, res) => {
   if (AUTH_REQUIRED && (req.body.pin || '') !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: 'Incorrect gate PIN' });
   }
-  store.setCheckedIn(found.invitee.id, true);
-  res.json({ ok: true, checkedInAt: store.getInvitee(found.invitee.id).checkedInAt });
+  const evt = store.findCheckinEventForInvite(found.invite.id);
+  if (evt && evt.seatPool && evt.seatPool.length) {
+    const result = store.checkInGuest(found.invitee.id, evt.id, 1);
+    if (result.error) return res.status(400).json({ error: result.error });
+  } else {
+    store.setCheckedIn(found.invitee.id, true);
+  }
+  const inv = store.getInvitee(found.invitee.id);
+  res.json({
+    ok: true,
+    checkedInAt: inv.checkedInAt,
+    seatNumbers: store.inviteeSeats(inv)
+  });
 });
 
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.webmanifest')) {
+      res.setHeader('Content-Type', 'application/manifest+json');
+    }
+  }
+}));
 
 app.listen(PORT, () => {
   console.log('\n  Worship Moments — Invitation Studio');

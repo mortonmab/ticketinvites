@@ -2,8 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#b8860b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Invites">
 <title>Worship Moments · Invitation Studio</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon-192.png" sizes="192x192">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -31,10 +39,12 @@
     <input type="text" id="baseUrl" placeholder="https://your-domain.com" title="The public address where this app is reachable. QR codes and RSVP links use this.">
   </div>
   <span class="lock" id="lock">Secured</span>
+  <button class="btn ghost sm install-btn hidden" id="installBtn" onclick="installApp()">Install app</button>
 </div>
 
 <div class="tabs" id="mainTabs">
-  <div class="tab active" data-tab="home" onclick="switchTab('home')">My Invitations</div>
+  <div class="tab active" data-tab="home" id="tabHomeBtn" onclick="switchTab('home')">My Invitations</div>
+  <div class="tab" data-tab="checkin" id="tabCheckinBtn" onclick="switchTab('checkin')">Check in Guests</div>
   <div class="tab hidden" data-tab="design" id="tabDesignBtn" onclick="switchTab('design')">Design &amp; Generate</div>
   <div class="tab hidden" data-tab="responses" id="tabResponsesBtn" onclick="switchTab('responses')">RSVP Responses</div>
 </div>
@@ -215,6 +225,86 @@
     </div>
     <div class="stats" id="stats"></div>
     <div id="respTableWrap"></div>
+  </div>
+</div>
+
+<!-- ===================== CHECK-IN TAB ===================== -->
+<div id="tab-checkin" class="hidden">
+  <div class="checkin-wrap">
+    <div class="checkin-head">
+      <div>
+        <h2>Check in guests</h2>
+        <p class="hint">Upload a pool of available seats, then assign them when guests arrive. Seats are not reserved before check-in.</p>
+      </div>
+      <button class="btn ghost sm" onclick="loadCheckin()">Refresh</button>
+    </div>
+
+    <div class="checkin-grid">
+      <div class="checkin-card">
+        <h3>Event &amp; invitations</h3>
+        <div class="fieldrow col">
+          <label>Check-in event</label>
+          <select id="checkinEventSelect" onchange="onCheckinEventChange()"></select>
+        </div>
+        <div class="fieldrow col">
+          <label>Event name</label>
+          <input type="text" id="checkinEventTitle" placeholder="e.g. Worship Moments — Main service">
+        </div>
+        <div class="fieldrow col">
+          <label>Available seats (Excel pool)</label>
+          <p class="hint" style="margin:0 0 8px">List every seat in your venue — one per row. Seats are handed out at check-in, first-come first-served.</p>
+          <div class="btnrow">
+            <button class="btn ghost sm" style="flex:1" onclick="downloadSeatTemplate()">Download template</button>
+            <label class="btn primary sm" style="flex:1;text-align:center;cursor:pointer;margin:0">
+              Upload seat pool
+              <input type="file" id="seatPlanInput" accept=".xlsx,.xls,.csv" hidden>
+            </label>
+          </div>
+          <div id="seatPlanStatus" class="seat-plan-status"></div>
+        </div>
+        <div class="fieldrow col">
+          <label>Invitation batches</label>
+          <div id="checkinInvitePick" class="invite-pick"></div>
+        </div>
+        <div class="btnrow">
+          <button class="btn primary sm" onclick="saveCheckinEvent()">Save event</button>
+          <button class="btn ghost sm" onclick="createNewCheckinEvent()">+ New event</button>
+        </div>
+      </div>
+
+      <div class="checkin-card">
+        <h3>Find guest</h3>
+        <div class="fieldrow col">
+          <label>Search by name or guest ID</label>
+          <input type="text" id="checkinSearch" placeholder="Start typing a name…" autocomplete="off">
+        </div>
+        <div id="checkinResults" class="checkin-results"></div>
+        <div id="checkinSelected" class="checkin-selected hidden"></div>
+      </div>
+    </div>
+
+    <div class="checkin-stats" id="checkinStats"></div>
+
+    <div class="checkin-card" style="margin-top:16px">
+      <div class="panel-head" style="margin-bottom:12px;padding:0">
+        <h3 style="margin:0;font-family:var(--serif);font-size:17px">Checked in</h3>
+      </div>
+      <div id="checkinTableWrap"></div>
+    </div>
+  </div>
+</div>
+
+<!-- seat success modal -->
+<div class="scrim" id="seatScrim">
+  <div class="modal seat-modal">
+    <div class="modal-head"><h3>Guest checked in</h3><button class="x" onclick="closeSeatModal()">×</button></div>
+    <div class="modal-body seat-body">
+      <div class="seat-name" id="seatGuestName"></div>
+      <div class="seat-num" id="seatNumber"></div>
+      <div class="seat-list" id="seatList"></div>
+      <div class="seat-sub" id="seatGuestMeta"></div>
+      <button class="btn primary" onclick="closeSeatModal()">Done</button>
+    </div>
   </div>
 </div>
 
